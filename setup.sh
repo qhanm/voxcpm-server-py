@@ -116,9 +116,14 @@ echo ""
 # -----------------------------------------------------------------------------
 log "[1/5] Verifying environment..."
 
-# Check Python
+# Check Python — install if missing
 if ! command -v python3 &> /dev/null; then
-    error "Python 3 not found"
+    warn "python3 not found, attempting to install..."
+    if command -v apt-get &> /dev/null; then
+        apt-get update -qq && apt-get install -y -qq python3 python3-pip || error "Failed to install python3"
+    else
+        error "Python 3 not found and cannot auto-install (no apt-get)"
+    fi
 fi
 PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
 success "Python: $PYTHON_VERSION"
@@ -155,6 +160,8 @@ if command -v apt-get &> /dev/null; then
     apt-get update -qq 2>&1 | tail -5 || warn "apt-get update had warnings"
     
     apt-get install -y -qq \
+        python3 \
+        python3-pip \
         libsndfile1 \
         ffmpeg \
         curl \
