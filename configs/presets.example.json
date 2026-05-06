@@ -1,0 +1,57 @@
+{
+  "default": {
+    "name": "Default voice",
+    "reference_audio": "reference.wav",
+    "reference_text_file": "reference.txt",
+    "style_instruction": "natural, clear",
+    "params": {
+      "cfg_value": 2.5,
+      "inference_timesteps": 20,
+      "temperature": 0.75
+    }
+  },
+  "storytelling": {
+    "name": "Storytelling - Kể chuyện",
+    "reference_audio": "presets/storytelling.wav",
+    "reference_text_file": "presets/storytelling.txt",
+    "style_instruction": "warm, intimate, emotional, slow pace, natural breath pauses",
+    "params": {
+      "cfg_value": 2.5,
+      "inference_timesteps": 25,
+      "temperature": 0.75
+    }
+  },
+  "news": {
+    "name": "News - Tin tức",
+    "reference_audio": "presets/news.wav",
+    "reference_text_file": "presets/news.txt",
+    "style_instruction": "formal, clear articulation, neutral tone, steady pace",
+    "params": {
+      "cfg_value": 2.8,
+      "inference_timesteps": 20,
+      "temperature": 0.7
+    }
+  },
+  "advertising": {
+    "name": "Advertising - Quảng cáo",
+    "reference_audio": "presets/advertising.wav",
+    "reference_text_file": "presets/advertising.txt",
+    "style_instruction": "energetic, enthusiastic, upbeat, faster pace",
+    "params": {
+      "cfg_value": 2.5,
+      "inference_timesteps": 22,
+      "temperature": 0.8
+    }
+  },
+  "conversation": {
+    "name": "Conversation - Đối thoại",
+    "reference_audio": "presets/conversation.wav",
+    "reference_text_file": "presets/conversation.txt",
+    "style_instruction": "casual, conversational, natural pauses, relaxed",
+    "params": {
+      "cfg_value": 2.3,
+      "inference_timesteps": 18,
+      "temperature": 0.8
+    }
+  }
+}

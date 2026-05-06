@@ -1,0 +1,43 @@
+# =============================================================================
+# VoxCPM2 Server - Python Dependencies
+# =============================================================================
+# Tested on: Template 4 (chieustudio/pytorch-2.5.1-cuda12.4-cudnn9-runtime)
+# 
+# IMPORTANT:
+# - PyTorch + torchaudio are PRE-INSTALLED in Template 4. DO NOT reinstall.
+# - These versions are LOCKED to ensure reproducible deployment.
+# - Update versions only after testing on a new server.
+# =============================================================================
+
+# --- VoxCPM2 core ---
+voxcpm==0.1.5
+
+# --- ML / Transformers (compatible with PyTorch 2.5.1) ---
+transformers==4.46.3
+accelerate==1.1.1
+safetensors==0.4.5
+tokenizers==0.20.3
+huggingface-hub==0.26.2
+
+# --- Audio processing ---
+soundfile==0.12.1
+librosa==0.10.2.post1
+audioread==3.0.1
+numpy==1.26.4
+scipy==1.14.1
+
+# --- FastAPI server ---
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.17
+pydantic==2.10.2
+pydantic-settings==2.6.1
+
+# --- Utilities ---
+loguru==0.7.2
+einops==0.8.0
+tqdm==4.67.0
+
+# --- Optional: for advanced usage (uncomment if needed) ---
+# google-generativeai==0.8.3   # If LLM preprocessing on server
+# boto3==1.35.50               # If S3/R2 upload from server
