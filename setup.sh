@@ -3,25 +3,28 @@
 # VoxCPM2 Server - Setup Script
 # =============================================================================
 # Usage on GPU server (Template 4 - PyTorch 2.5.1 CUDA 12.4):
-#   bash setup.sh
+#   bash setup.sh                 # Full setup (install + download model)
+#   bash setup.sh --skip-model    # Skip model download (manual later)
+#   bash setup.sh --skip-deps     # Skip pip install (already installed)
 #
 # This script will:
+#   0. Create .env file if not exists (with auto-generated API_KEY)
 #   1. Verify PyTorch + CUDA available
 #   2. Install system dependencies (libsndfile, ffmpeg)
 #   3. Install Python dependencies (locked versions)
-#   4. Download VoxCPM2 model from HuggingFace (~5GB)
-#   5. Verify imports work
+#   4. Verify imports work
+#   5. Download VoxCPM2 model from HuggingFace (~5GB)
 # =============================================================================
 
-set -e  # Exit on error
-set -u  # Error on undefined variable
+set -e
+set -u
 
-# Colors for output
+# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 log() {
     echo -e "${BLUE}[$(date +'%H:%M:%S')]${NC} $1"
@@ -36,9 +39,23 @@ warn() {
 }
 
 error() {
-    echo -e "${RED}[$(date +'%H:%M:%S')] ✗${NC} $1"
+    echo -e "${RED}[$(date +'%H:%M:%S')] ✗${NC} $1" >&2
     exit 1
 }
+
+# Parse arguments
+SKIP_MODEL=false
+SKIP_DEPS=false
+for arg in "$@"; do
+    case "$arg" in
+        --skip-model) SKIP_MODEL=true ;;
+        --skip-deps) SKIP_DEPS=true ;;
+        --help|-h)
+            echo "Usage: $0 [--skip-model] [--skip-deps]"
+            exit 0
+            ;;
+    esac
+done
 
 # Track timing
 START_TIME=$(date +%s)
@@ -51,22 +68,66 @@ log "Working directory: $SCRIPT_DIR"
 echo ""
 
 # -----------------------------------------------------------------------------
+# Step 0: Setup .env file
+# -----------------------------------------------------------------------------
+log "[0/5] Setting up .env file..."
+
+if [ ! -f ".env" ]; then
+    if [ -f "init-env.sh" ]; then
+        chmod +x init-env.sh
+        bash init-env.sh
+    else
+        warn "init-env.sh not found, creating .env manually"
+        
+        # Generate API key
+        if command -v openssl &> /dev/null; then
+            API_KEY=$(openssl rand -hex 32)
+        else
+            API_KEY=$(head -c 32 /dev/urandom | xxd -p -c 64)
+        fi
+        
+        cat > .env << EOF
+API_KEY=${API_KEY}
+HOST=0.0.0.0
+PORT=8000
+LOG_LEVEL=INFO
+MODEL_PATH=./models/VoxCPM2
+VOICE_LIBRARY_DIR=./voice_library
+OUTPUTS_DIR=./outputs
+CACHE_DIR=./cache
+LOAD_DENOISER=false
+EOF
+        chmod 600 .env
+        success ".env created with auto-generated API_KEY: ${API_KEY:0:8}..."
+    fi
+else
+    success ".env already exists, keeping current values"
+fi
+
+# Load .env to use during setup
+set -a
+source <(grep -v '^#' .env | grep -v '^$' | sed 's/^/export /')
+set +a
+
+echo ""
+
+# -----------------------------------------------------------------------------
 # Step 1: Verify environment
 # -----------------------------------------------------------------------------
 log "[1/5] Verifying environment..."
 
-# Check Python version
+# Check Python
 if ! command -v python3 &> /dev/null; then
     error "Python 3 not found"
 fi
 PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
 success "Python: $PYTHON_VERSION"
 
-# Check PyTorch (should be pre-installed in Template 4)
+# Check PyTorch
 PYTORCH_INFO=$(python3 -c "
 import torch
 print(f'{torch.__version__}|{torch.version.cuda}|{torch.cuda.is_available()}|{torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"N/A\"}')
-" 2>/dev/null) || error "PyTorch not found. Make sure you're using Template 4 (PyTorch 2.5.1 CUDA 12.4)"
+" 2>/dev/null) || error "PyTorch not found. Use Template 4 (PyTorch 2.5.1 CUDA 12.4)"
 
 IFS='|' read -r TORCH_VER CUDA_VER CUDA_AVAIL GPU_NAME <<< "$PYTORCH_INFO"
 
@@ -77,10 +138,9 @@ if [ "$CUDA_AVAIL" != "True" ]; then
 fi
 success "GPU: $GPU_NAME"
 
-# Verify PyTorch version compatible
 if [[ ! "$TORCH_VER" =~ ^2\.5\. ]]; then
     warn "PyTorch version is $TORCH_VER, expected 2.5.x"
-    warn "VoxCPM2 may have compatibility issues. Continue? (5s to abort with Ctrl+C)"
+    warn "VoxCPM2 may have compatibility issues. Continue? (5s to abort)"
     sleep 5
 fi
 
@@ -104,7 +164,7 @@ if command -v apt-get &> /dev/null; then
     
     success "System dependencies installed"
 else
-    warn "apt-get not found, skipping system deps (may need to install manually)"
+    warn "apt-get not found, skipping system deps"
 fi
 
 echo ""
@@ -112,32 +172,34 @@ echo ""
 # -----------------------------------------------------------------------------
 # Step 3: Python dependencies
 # -----------------------------------------------------------------------------
-log "[3/5] Installing Python dependencies..."
-
-if [ ! -f "requirements.txt" ]; then
-    error "requirements.txt not found in $SCRIPT_DIR"
-fi
-
-# Upgrade pip first
-pip install --quiet --upgrade pip 2>&1 | tail -3 || warn "Pip upgrade had warnings"
-
-# Install with retry logic
-MAX_RETRIES=3
-RETRY=0
-while [ $RETRY -lt $MAX_RETRIES ]; do
-    if pip install --no-cache-dir -r requirements.txt; then
-        success "Python dependencies installed"
-        break
-    else
-        RETRY=$((RETRY + 1))
-        if [ $RETRY -lt $MAX_RETRIES ]; then
-            warn "pip install failed, retrying ($RETRY/$MAX_RETRIES)..."
-            sleep 10
-        else
-            error "Failed to install Python dependencies after $MAX_RETRIES attempts"
-        fi
+if [ "$SKIP_DEPS" = true ]; then
+    log "[3/5] Skipping Python deps (--skip-deps)"
+else
+    log "[3/5] Installing Python dependencies..."
+    
+    if [ ! -f "requirements.txt" ]; then
+        error "requirements.txt not found"
     fi
-done
+    
+    pip install --quiet --upgrade pip 2>&1 | tail -3 || warn "Pip upgrade had warnings"
+    
+    MAX_RETRIES=3
+    RETRY=0
+    while [ $RETRY -lt $MAX_RETRIES ]; do
+        if pip install --no-cache-dir -r requirements.txt; then
+            success "Python dependencies installed"
+            break
+        else
+            RETRY=$((RETRY + 1))
+            if [ $RETRY -lt $MAX_RETRIES ]; then
+                warn "pip install failed, retrying ($RETRY/$MAX_RETRIES)..."
+                sleep 10
+            else
+                error "Failed to install Python deps after $MAX_RETRIES attempts"
+            fi
+        fi
+    done
+fi
 
 echo ""
 
@@ -183,17 +245,21 @@ echo ""
 # -----------------------------------------------------------------------------
 # Step 5: Download model
 # -----------------------------------------------------------------------------
-log "[5/5] Downloading VoxCPM2 model (~5GB)..."
-
-MODEL_PATH="${MODEL_PATH:-./models/VoxCPM2}"
-
-if [ -d "$MODEL_PATH" ] && [ "$(ls -A "$MODEL_PATH" 2>/dev/null)" ]; then
-    warn "Model already exists at $MODEL_PATH"
-    warn "Skipping download. Delete folder and re-run to force download."
+if [ "$SKIP_MODEL" = true ]; then
+    log "[5/5] Skipping model download (--skip-model)"
+    warn "Server will download model on first start"
 else
-    mkdir -p "$(dirname "$MODEL_PATH")"
+    log "[5/5] Downloading VoxCPM2 model (~5GB)..."
     
-    python3 << EOF || error "Model download failed"
+    MODEL_PATH="${MODEL_PATH:-./models/VoxCPM2}"
+    
+    if [ -d "$MODEL_PATH" ] && [ "$(ls -A "$MODEL_PATH" 2>/dev/null)" ]; then
+        warn "Model already exists at $MODEL_PATH"
+        warn "Skipping download. Delete folder and re-run to force download."
+    else
+        mkdir -p "$(dirname "$MODEL_PATH")"
+        
+        python3 << EOF || error "Model download failed"
 from huggingface_hub import snapshot_download
 import time
 
@@ -210,8 +276,9 @@ snapshot_download(
 duration = time.time() - start
 print(f"✓ Model downloaded in {duration:.1f}s")
 EOF
-    
-    success "Model downloaded to $MODEL_PATH"
+        
+        success "Model downloaded to $MODEL_PATH"
+    fi
 fi
 
 echo ""
@@ -224,8 +291,11 @@ SECONDS=$((DURATION % 60))
 
 success "=== Setup completed in ${MINUTES}m ${SECONDS}s ==="
 echo ""
+log "Configuration saved to: $SCRIPT_DIR/.env"
+log ""
 log "Next steps:"
-log "  1. Set API key:    export API_KEY=\"\$(openssl rand -hex 32)\""
-log "  2. Start server:   bash start.sh"
-log "  3. Health check:   bash health-check.sh"
+log "  Start server:   bash start.sh --daemon"
+log "  Health check:   bash health-check.sh"
+log "  Stop server:    bash stop.sh"
+log "  View API key:   grep API_KEY .env"
 echo ""

@@ -2,10 +2,17 @@
 # =============================================================================
 # VoxCPM2 Server - Start Script
 # =============================================================================
+# Auto-loads .env file if exists, then starts uvicorn server.
+#
 # Usage:
 #   bash start.sh                    # Run in foreground
 #   bash start.sh --daemon           # Run as background daemon
-#   nohup bash start.sh > server.log 2>&1 &   # Manual daemon
+#   bash start.sh -d                 # Same as --daemon
+#
+# Environment loading priority (later overrides earlier):
+#   1. .env file (if exists)
+#   2. Shell environment variables
+#   3. Command line (export VAR=value bash start.sh)
 # =============================================================================
 
 set -e
@@ -21,25 +28,58 @@ log() {
     echo -e "${BLUE}[$(date +'%H:%M:%S')]${NC} $1"
 }
 
+success() {
+    echo -e "${GREEN}[$(date +'%H:%M:%S')] ✓${NC} $1"
+}
+
+warn() {
+    echo -e "${YELLOW}[$(date +'%H:%M:%S')] ⚠${NC} $1"
+}
+
+error() {
+    echo -e "${RED}[$(date +'%H:%M:%S')] ✗${NC} $1" >&2
+    exit 1
+}
+
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # -----------------------------------------------------------------------------
-# Validate environment
+# Load .env file if exists
+# -----------------------------------------------------------------------------
+if [ -f ".env" ]; then
+    log "Loading .env file..."
+    
+    # Export all variables from .env (handle comments and empty lines)
+    set -a   # Auto-export all variables
+    # shellcheck disable=SC1091
+    source <(grep -v '^#' .env | grep -v '^$' | sed 's/^/export /')
+    set +a
+    
+    success ".env loaded"
+else
+    warn ".env file not found, using shell environment"
+fi
+
+# -----------------------------------------------------------------------------
+# Validate required variables
 # -----------------------------------------------------------------------------
 if [ -z "${API_KEY:-}" ]; then
-    echo -e "${RED}✗ API_KEY environment variable is required${NC}"
-    echo "Generate one with: export API_KEY=\"\$(openssl rand -hex 32)\""
-    exit 1
+    error "API_KEY is required. Set in .env file or run: export API_KEY=\"\$(openssl rand -hex 32)\""
 fi
 
-if [ "${API_KEY}" = "change-me-in-production" ]; then
-    echo -e "${RED}✗ Please change API_KEY from default value${NC}"
-    exit 1
+if [ "${API_KEY}" = "change-me-in-production" ] || [ "${API_KEY}" = "change-me-to-strong-random-string" ]; then
+    error "API_KEY is using default placeholder. Generate a real one: openssl rand -hex 32"
 fi
 
-# Set defaults
+if [ ${#API_KEY} -lt 16 ]; then
+    warn "API_KEY is short (${#API_KEY} chars). Recommend at least 32 chars: openssl rand -hex 32"
+fi
+
+# -----------------------------------------------------------------------------
+# Set defaults for optional variables
+# -----------------------------------------------------------------------------
 export MODEL_PATH="${MODEL_PATH:-$SCRIPT_DIR/models/VoxCPM2}"
 export VOICE_LIBRARY_DIR="${VOICE_LIBRARY_DIR:-$SCRIPT_DIR/voice_library}"
 export OUTPUTS_DIR="${OUTPUTS_DIR:-$SCRIPT_DIR/outputs}"
@@ -49,47 +89,86 @@ export LOG_LEVEL="${LOG_LEVEL:-INFO}"
 export PORT="${PORT:-8000}"
 export HOST="${HOST:-0.0.0.0}"
 
-# Create dirs
-mkdir -p "$VOICE_LIBRARY_DIR" "$OUTPUTS_DIR" "$CACHE_DIR" /var/log
+# Create dirs (must succeed)
+mkdir -p "$VOICE_LIBRARY_DIR" "$OUTPUTS_DIR" "$CACHE_DIR" 2>/dev/null || \
+    warn "Failed to create some directories"
 
+# Try to create log directory
+mkdir -p /var/log 2>/dev/null || true
+
+# -----------------------------------------------------------------------------
 # Verify model exists
+# -----------------------------------------------------------------------------
 if [ ! -d "$MODEL_PATH" ] || [ -z "$(ls -A "$MODEL_PATH" 2>/dev/null)" ]; then
-    echo -e "${YELLOW}⚠ Model not found at $MODEL_PATH${NC}"
-    echo "Run setup.sh first, or model will download on first start."
+    warn "Model not found at: $MODEL_PATH"
+    warn "Server will try to download from HuggingFace on startup (~5GB)"
+    warn "Recommend running 'bash setup.sh' first to download model"
 fi
 
 # -----------------------------------------------------------------------------
-# Show config
+# Show configuration
 # -----------------------------------------------------------------------------
-log "=== VoxCPM2 Server Starting ==="
-log "Host:              $HOST:$PORT"
-log "Model path:        $MODEL_PATH"
-log "Voice library:     $VOICE_LIBRARY_DIR"
-log "Outputs dir:       $OUTPUTS_DIR"
-log "Log level:         $LOG_LEVEL"
-log "API key:           ${API_KEY:0:8}...***"
 echo ""
+log "=== VoxCPM2 Server Starting ==="
+log "Working dir:        $SCRIPT_DIR"
+log "Host:               $HOST:$PORT"
+log "Model path:         $MODEL_PATH"
+log "Voice library:      $VOICE_LIBRARY_DIR"
+log "Outputs dir:        $OUTPUTS_DIR"
+log "Log level:          $LOG_LEVEL"
+log "Load denoiser:      $LOAD_DENOISER"
+log "API key:            ${API_KEY:0:8}...***${API_KEY: -4}"
+echo ""
+
+# -----------------------------------------------------------------------------
+# Parse arguments
+# -----------------------------------------------------------------------------
+DAEMON_MODE=false
+for arg in "$@"; do
+    case "$arg" in
+        --daemon|-d)
+            DAEMON_MODE=true
+            ;;
+        --help|-h)
+            echo "Usage: $0 [--daemon|-d]"
+            echo ""
+            echo "Options:"
+            echo "  --daemon, -d    Run server in background (daemon mode)"
+            echo "  --help, -h      Show this help"
+            echo ""
+            echo "Environment variables (set in .env or export):"
+            echo "  API_KEY              (required) Strong random API key"
+            echo "  PORT                 Server port (default: 8000)"
+            echo "  HOST                 Bind address (default: 0.0.0.0)"
+            echo "  MODEL_PATH           Path to VoxCPM2 model"
+            echo "  LOG_LEVEL            DEBUG / INFO / WARNING / ERROR"
+            echo "  LOAD_DENOISER        true / false"
+            exit 0
+            ;;
+    esac
+done
 
 # -----------------------------------------------------------------------------
 # Run server
 # -----------------------------------------------------------------------------
-DAEMON_MODE=false
-for arg in "$@"; do
-    if [ "$arg" = "--daemon" ] || [ "$arg" = "-d" ]; then
-        DAEMON_MODE=true
-    fi
-done
-
 if [ "$DAEMON_MODE" = true ]; then
-    log "Starting in daemon mode..."
     LOG_FILE="${LOG_FILE:-/var/log/voxcpm-server.log}"
     PID_FILE="${PID_FILE:-/tmp/voxcpm-server.pid}"
     
+    # Try fallback log location if /var/log not writable
+    if ! touch "$LOG_FILE" 2>/dev/null; then
+        LOG_FILE="$SCRIPT_DIR/voxcpm-server.log"
+        warn "Cannot write to /var/log, using $LOG_FILE"
+    fi
+    
     # Check if already running
     if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-        echo -e "${RED}✗ Server already running (PID: $(cat "$PID_FILE"))${NC}"
-        exit 1
+        error "Server already running (PID: $(cat "$PID_FILE")). Stop with: bash stop.sh"
     fi
+    
+    log "Starting in DAEMON mode..."
+    log "Log file: $LOG_FILE"
+    log "PID file: $PID_FILE"
     
     nohup uvicorn server:app \
         --host "$HOST" \
@@ -103,19 +182,22 @@ if [ "$DAEMON_MODE" = true ]; then
     
     log "Server started, PID: $SERVER_PID"
     log "Logs: tail -f $LOG_FILE"
-    log "Stop: bash stop.sh  (or kill \$(cat $PID_FILE))"
+    log "Stop: bash stop.sh"
     
     # Wait a bit and verify it's still alive
     sleep 3
     if kill -0 "$SERVER_PID" 2>/dev/null; then
-        echo -e "${GREEN}✓ Server is running${NC}"
+        success "Server is running"
+        log "Run 'bash health-check.sh' to wait for model load complete"
     else
-        echo -e "${RED}✗ Server failed to start. Check logs: $LOG_FILE${NC}"
-        tail -20 "$LOG_FILE"
+        echo ""
+        error "Server failed to start. Last log lines:"
+        tail -30 "$LOG_FILE"
         exit 1
     fi
 else
-    log "Starting in foreground mode (Ctrl+C to stop)..."
+    log "Starting in FOREGROUND mode (Ctrl+C to stop)..."
+    echo ""
     exec uvicorn server:app \
         --host "$HOST" \
         --port "$PORT" \

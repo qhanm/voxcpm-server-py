@@ -1,6 +1,10 @@
 """
 VoxCPM2 TTS Server
 FastAPI server for voice cloning and TTS using VoxCPM2 model.
+
+Environment variables loaded from:
+  1. .env file (if exists, via python-dotenv)
+  2. OS environment variables (override .env)
 """
 import os
 import io
@@ -11,8 +15,18 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
 
-import functools
-import uuid
+# Load .env file early (before any other imports that read env)
+try:
+    from dotenv import load_dotenv
+    env_file = Path(__file__).parent / ".env"
+    if env_file.exists():
+        load_dotenv(env_file, override=False)  # Don't override OS env
+        print(f"✓ Loaded .env from {env_file}")
+    else:
+        print(f"⚠ No .env file found at {env_file}")
+except ImportError:
+    print("⚠ python-dotenv not installed, using OS environment only")
+
 import torch
 import soundfile as sf
 import numpy as np
@@ -25,14 +39,24 @@ from voxcpm import VoxCPM
 
 
 # ============================================================
-# Configuration
+# Configuration (from environment)
 # ============================================================
-API_KEY = os.environ.get("API_KEY", "change-me-in-production")
+API_KEY = os.environ.get("API_KEY", "")
 MODEL_PATH = os.environ.get("MODEL_PATH", "./models/VoxCPM2")
 VOICE_LIBRARY_DIR = Path(os.environ.get("VOICE_LIBRARY_DIR", "./voice_library"))
 OUTPUTS_DIR = Path(os.environ.get("OUTPUTS_DIR", "./outputs"))
 CACHE_DIR = Path(os.environ.get("CACHE_DIR", "./cache"))
 LOAD_DENOISER = os.environ.get("LOAD_DENOISER", "false").lower() == "true"
+
+# Validate critical config
+if not API_KEY or API_KEY in ("change-me-in-production", "change-me-to-strong-random-string"):
+    raise RuntimeError(
+        "API_KEY environment variable is required and cannot be the default value. "
+        "Set in .env file or run: export API_KEY=$(openssl rand -hex 32)"
+    )
+
+if len(API_KEY) < 16:
+    print(f"⚠ Warning: API_KEY is short ({len(API_KEY)} chars). Recommend 32+ chars.")
 
 # Create directories
 VOICE_LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
@@ -66,15 +90,22 @@ model_state = {
 async def lifespan(app: FastAPI):
     """Load VoxCPM2 model on startup."""
     logger.info(f"Loading VoxCPM2 model from {MODEL_PATH}...")
+    logger.info(f"Configuration:")
+    logger.info(f"  MODEL_PATH:        {MODEL_PATH}")
+    logger.info(f"  VOICE_LIBRARY_DIR: {VOICE_LIBRARY_DIR}")
+    logger.info(f"  OUTPUTS_DIR:       {OUTPUTS_DIR}")
+    logger.info(f"  CACHE_DIR:         {CACHE_DIR}")
+    logger.info(f"  LOAD_DENOISER:     {LOAD_DENOISER}")
+    logger.info(f"  API_KEY:           {API_KEY[:8]}...***{API_KEY[-4:]} ({len(API_KEY)} chars)")
+    
     start = time.time()
     
     try:
-        # Try local path first, fallback to HuggingFace download
         if Path(MODEL_PATH).exists():
             logger.info(f"Loading from local path: {MODEL_PATH}")
             model = VoxCPM.from_pretrained(MODEL_PATH, load_denoiser=LOAD_DENOISER)
         else:
-            logger.info(f"Local path not found, downloading from HuggingFace: openbmb/VoxCPM2")
+            logger.warning(f"Local path not found, downloading from HuggingFace...")
             model = VoxCPM.from_pretrained("openbmb/VoxCPM2", load_denoiser=LOAD_DENOISER)
         
         duration = time.time() - start
@@ -96,7 +127,6 @@ async def lifespan(app: FastAPI):
     
     yield
     
-    # Cleanup on shutdown
     logger.info("Shutting down...")
     model_state["model"] = None
     if torch.cuda.is_available():
@@ -181,7 +211,6 @@ def load_voice_preset(voice_id: str, preset: str = "default") -> dict:
     
     config = presets[preset]
     
-    # Resolve file paths
     ref_audio_path = voice_dir / config["reference_audio"]
     if not ref_audio_path.exists():
         raise HTTPException(
@@ -261,7 +290,7 @@ async def tts(
     inference_timesteps: int = Form(10),
     api_key: str = Depends(verify_api_key),
 ):
-    """Voice Design - generate audio from text + voice description (no audio sample)."""
+    """Voice Design - generate audio from text + voice description."""
     if not text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
     
@@ -274,25 +303,20 @@ async def tts(
     start = time.time()
     
     try:
-        loop = asyncio.get_event_loop()
-        wav = await loop.run_in_executor(
-            None,
-            functools.partial(
-                model.generate,
-                text=text,
-                cfg_value=cfg_value,
-                inference_timesteps=inference_timesteps,
-            ),
+        wav = model.generate(
+            text=text,
+            cfg_value=cfg_value,
+            inference_timesteps=inference_timesteps,
         )
-
+        
         duration = time.time() - start
         audio_duration = len(wav) / model.tts_model.sample_rate
         rtf = duration / audio_duration if audio_duration > 0 else 0
-
+        
         logger.success(f"✓ Generated {audio_duration:.1f}s audio in {duration:.1f}s (RTF: {rtf:.2f})")
-
+        
         wav_bytes = audio_to_wav_bytes(wav, model.tts_model.sample_rate)
-
+        
         return StreamingResponse(
             io.BytesIO(wav_bytes),
             media_type="audio/wav",
@@ -326,18 +350,16 @@ async def clone_voice(
     if len(text) > 5000:
         raise HTTPException(status_code=400, detail="Text too long (max 5000 chars)")
     
-    # Save uploaded audio temporarily
     audio_bytes = await reference_audio.read()
     if len(audio_bytes) == 0:
         raise HTTPException(status_code=400, detail="Reference audio is empty")
     
-    if len(audio_bytes) > 50 * 1024 * 1024:  # 50MB limit
+    if len(audio_bytes) > 50 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Reference audio too large (max 50MB)")
     
-    temp_audio_path = CACHE_DIR / f"ref_{uuid.uuid4().hex}.wav"
+    temp_audio_path = CACHE_DIR / f"ref_{int(time.time() * 1000)}.wav"
     
     try:
-        # Save temp file
         with open(temp_audio_path, "wb") as f:
             f.write(audio_bytes)
         
@@ -349,7 +371,6 @@ async def clone_voice(
         )
         start = time.time()
         
-        # Generate with reference audio
         generate_kwargs = {
             "text": text,
             "prompt_wav_path": str(temp_audio_path),
@@ -362,16 +383,13 @@ async def clone_voice(
         
         if style_instruction.strip():
             generate_kwargs["style_instruction"] = style_instruction
-
-        generate_kwargs["temperature"] = temperature
-
-        loop = asyncio.get_event_loop()
-        wav = await loop.run_in_executor(None, functools.partial(model.generate, **generate_kwargs))
-
+        
+        wav = model.generate(**generate_kwargs)
+        
         duration = time.time() - start
         audio_duration = len(wav) / model.tts_model.sample_rate
         rtf = duration / audio_duration if audio_duration > 0 else 0
-
+        
         logger.success(f"✓ Cloned {audio_duration:.1f}s audio in {duration:.1f}s (RTF: {rtf:.2f})")
         
         wav_bytes = audio_to_wav_bytes(wav, model.tts_model.sample_rate)
@@ -392,7 +410,6 @@ async def clone_voice(
         logger.error(f"Clone generation failed: {e}")
         raise HTTPException(status_code=500, detail=f"Clone failed: {str(e)}")
     finally:
-        # Cleanup temp file
         if temp_audio_path.exists():
             try:
                 temp_audio_path.unlink()
@@ -414,7 +431,6 @@ async def clone_with_preset(
     if len(text) > 5000:
         raise HTTPException(status_code=400, detail="Text too long (max 5000 chars)")
     
-    # Load preset config
     preset_config = load_voice_preset(voice_id, preset)
     
     model = get_model()
@@ -440,13 +456,12 @@ async def clone_with_preset(
         if preset_config["style_instruction"]:
             generate_kwargs["style_instruction"] = preset_config["style_instruction"]
         
-        loop = asyncio.get_event_loop()
-        wav = await loop.run_in_executor(None, functools.partial(model.generate, **generate_kwargs))
-
+        wav = model.generate(**generate_kwargs)
+        
         duration = time.time() - start
         audio_duration = len(wav) / model.tts_model.sample_rate
         rtf = duration / audio_duration if audio_duration > 0 else 0
-
+        
         logger.success(
             f"✓ Generated {audio_duration:.1f}s with {voice_id}/{preset} "
             f"in {duration:.1f}s (RTF: {rtf:.2f})"
@@ -480,7 +495,7 @@ if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
         "server:app",
-        host="0.0.0.0",
+        host=os.environ.get("HOST", "0.0.0.0"),
         port=int(os.environ.get("PORT", 8000)),
         log_level=os.environ.get("LOG_LEVEL", "info").lower(),
     )

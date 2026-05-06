@@ -7,90 +7,117 @@ FastAPI server for **VoxCPM2** voice cloning and TTS, designed for direct Python
 - ✅ **5 endpoints**: health, voices, tts, clone, clone-with-preset
 - ✅ **Multi-language** support (30 languages including Vietnamese)
 - ✅ **Voice library** with multi-preset support
-- ✅ **API key auth** for security
+- ✅ **API key auth** (auto-generated, secure)
 - ✅ **Streaming WAV** binary response
 - ✅ **Production-ready** logging, error handling, health checks
+- ✅ **Auto-load .env** file (no manual export needed)
 - ✅ **Compatible with ckey.vn Template 4** (PyTorch 2.5.1 CUDA 12.4)
 
 ## Quick Start
 
-### On GPU server (ckey.vn Template 4 - PyTorch)
+### On GPU server (ckey.vn Template 4)
 
 ```bash
 # 1. Clone repo
 git clone https://github.com/qhanm/voxcpm-server-py.git
 cd voxcpm-server-py
 
-# 2. Setup (one-time, ~10 minutes)
+# 2. Make scripts executable
 chmod +x *.sh
+
+# 3. Setup (one-time, ~10 minutes)
+# This will:
+# - Auto-create .env file with random API_KEY
+# - Install Python dependencies
+# - Download VoxCPM2 model (5GB)
 bash setup.sh
 
-# 3. Set API key
-export API_KEY="$(openssl rand -hex 32)"
-echo "Save this key: $API_KEY"
-
-# 4. Start server (foreground)
-bash start.sh
-
-# Or daemon mode
+# 4. Start server (daemon mode)
 bash start.sh --daemon
 
-# 5. Verify health (in another terminal)
+# 5. Verify health
 bash health-check.sh
+
+# 6. View API key (save for backend integration)
+grep API_KEY .env
 ```
 
 ### Test from local machine
 
 ```bash
+# Install requests
+pip install requests
+
+# Run test client
 python3 test-client.py \
     --server http://gpu-server-ip:8000 \
-    --api-key YOUR_API_KEY \
-    --reference-audio /path/to/sample.wav
+    --api-key "$(grep API_KEY .env | cut -d= -f2)"
 ```
+
+## Environment Setup
+
+Server tự động đọc `.env` file. Có 3 cách setup:
+
+### Cách 1: Auto-generated (recommend)
+
+```bash
+bash init-env.sh
+```
+
+→ Tạo `.env` với API_KEY random + defaults.
+
+### Cách 2: Manual
+
+```bash
+cp .env.example .env
+# Edit .env, đặt API_KEY mạnh
+nano .env
+```
+
+### Cách 3: Runtime override (backend orchestrator)
+
+```bash
+# Export trước khi run, không cần .env
+export API_KEY="your-key-from-backend"
+bash start.sh
+```
+
+→ Xem chi tiết: [docs/env-management.md](docs/env-management.md)
 
 ## Project Structure
 
 ```
 voxcpm-server-py/
-├── server.py                  # Main FastAPI server
+├── server.py                  # Main FastAPI server (auto-loads .env)
 ├── test-client.py             # Test client
 ├── requirements.txt           # Locked Python dependencies
 │
+├── init-env.sh                # Generate .env with random API_KEY
 ├── setup.sh                   # Install + download model
-├── start.sh                   # Start server
+├── start.sh                   # Start server (auto-loads .env)
 ├── stop.sh                    # Stop daemon
 ├── health-check.sh            # Wait for server ready
 │
 ├── configs/
 │   └── presets.example.json   # Voice preset config example
 │
-├── utils/
-│   └── __init__.py
-│
 ├── docs/
 │   ├── deployment.md          # Deployment guide
+│   ├── env-management.md      # Environment configuration ⭐
 │   ├── troubleshooting.md     # Common errors & fixes
 │   └── api-reference.md       # API documentation
 │
 ├── voice_library/             # Voice library (gitignored)
-│   └── voice_001/
-│       ├── reference.wav
-│       ├── reference.txt
-│       └── presets.json
-│
 ├── models/                    # Downloaded model (gitignored, ~5GB)
-│   └── VoxCPM2/
 │
-├── .env.example
+├── .env.example               # Env template
 ├── .gitignore
 └── README.md
 ```
 
 ## API Endpoints
 
-### `GET /health`
-
-Health check. **No auth required.**
+### `GET /health` (no auth)
 
 ```bash
 curl http://localhost:8000/health
@@ -98,76 +125,49 @@ curl http://localhost:8000/health
 
 ### `GET /voices`
 
-List voices in library.
-
 ```bash
-curl -H "X-API-Key: YOUR_KEY" http://localhost:8000/voices
+API_KEY=$(grep API_KEY .env | cut -d= -f2)
+curl -H "X-API-Key: $API_KEY" http://localhost:8000/voices
 ```
 
 ### `POST /tts` - Voice Design
 
-Generate audio from text + voice description (no audio sample needed).
-
 ```bash
 curl -X POST http://localhost:8000/tts \
-    -H "X-API-Key: YOUR_KEY" \
+    -H "X-API-Key: $API_KEY" \
     -F "text=Xin chào, đây là test" \
     -F "voice_description=A warm Vietnamese male voice" \
-    -F "cfg_value=2.0" \
-    -F "inference_timesteps=15" \
     -o output.wav
 ```
 
 ### `POST /clone` - Voice Cloning
 
-Clone voice from uploaded audio sample.
-
 ```bash
 curl -X POST http://localhost:8000/clone \
-    -H "X-API-Key: YOUR_KEY" \
+    -H "X-API-Key: $API_KEY" \
     -F "text=Đây là giọng được clone" \
     -F "reference_audio=@/path/to/sample.wav" \
-    -F "reference_text=Transcript chính xác của file mẫu" \
+    -F "reference_text=Transcript chính xác" \
     -F "style_instruction=warm, slow" \
-    -F "cfg_value=2.8" \
-    -F "inference_timesteps=25" \
     -o cloned.wav
 ```
 
-### `POST /clone-with-preset` - Library Voice
-
-Generate audio using voice from library.
+### `POST /clone-with-preset`
 
 ```bash
 curl -X POST http://localhost:8000/clone-with-preset \
-    -H "X-API-Key: YOUR_KEY" \
+    -H "X-API-Key: $API_KEY" \
     -F "text=Sử dụng giọng có sẵn" \
-    -F "voice_id=voice_001_male_warm" \
+    -F "voice_id=voice_001" \
     -F "preset=storytelling" \
     -o output.wav
 ```
 
-## Voice Library Setup
-
-Each voice is a folder with reference audio + transcripts + presets.json:
-
-```
-voice_library/voice_001_male_warm/
-├── reference.wav              # Master reference audio (60s)
-├── reference.txt              # Transcript of reference.wav
-├── presets.json               # Preset configurations
-└── presets/
-    ├── storytelling.wav       # 30s storytelling sample
-    ├── storytelling.txt
-    ├── news.wav
-    └── news.txt
-```
-
-See `configs/presets.example.json` for full preset config example.
+→ Full API reference: [docs/api-reference.md](docs/api-reference.md)
 
 ## Performance
 
-Tested on **NVIDIA RTX 5060 Ti 16GB** (Template 4 ckey.vn):
+Tested on **NVIDIA RTX 5060 Ti 16GB**:
 
 | Operation | Time | RTF |
 |---|---|---|
@@ -178,46 +178,63 @@ Tested on **NVIDIA RTX 5060 Ti 16GB** (Template 4 ckey.vn):
 
 VRAM usage: ~7-8GB (model) + 1-2GB (inference buffer).
 
-## Environment Variables
+## Voice Library Setup
 
-See `.env.example` for full list.
+```
+voice_library/voice_001_male_warm/
+├── reference.wav              # Master reference audio (60s)
+├── reference.txt              # Transcript
+├── presets.json               # Preset configs
+└── presets/
+    ├── storytelling.wav
+    └── storytelling.txt
+```
 
-| Variable | Default | Description |
-|---|---|---|
-| `API_KEY` | (required) | API authentication key |
-| `MODEL_PATH` | `./models/VoxCPM2` | Path to model weights |
-| `VOICE_LIBRARY_DIR` | `./voice_library` | Voice library folder |
-| `PORT` | `8000` | Server port |
-| `LOG_LEVEL` | `INFO` | DEBUG / INFO / WARNING / ERROR |
-| `LOAD_DENOISER` | `false` | Load denoiser (extra ~1GB VRAM) |
+→ See `configs/presets.example.json` for full config.
 
 ## Deployment Strategies
 
-### 1. Manual (Development)
+### Manual (Development)
 
-SSH into GPU server, run setup + start manually.
+```bash
+git clone ...
+cd voxcpm-server-py
+bash setup.sh
+bash start.sh --daemon
+```
 
-### 2. SSH Automation (Production)
+### Automated (Production via NestJS Backend)
 
-Backend orchestrator (NestJS) handles:
-- Rent GPU via ckey.vn API
-- SSH into server
-- `git clone` + `bash setup.sh` + `bash start.sh --daemon`
-- Health check + register endpoint
+Backend NestJS:
+1. Rents GPU via ckey.vn API
+2. SSH into server
+3. `git clone` + `bash setup.sh`
+4. Inject API_KEY env + `bash start.sh --daemon`
+5. Health check + register
 
-See `docs/deployment.md` for full automation guide.
+→ See [docs/deployment.md](docs/deployment.md)
 
-### 3. Cached Deployment (Faster)
+### Cached (Faster, ~3-5 min)
 
-Pre-build venv archive + cache on R2/MinIO:
+Pre-build venv archive on R2/MinIO:
 - First setup: 10 minutes
-- Subsequent: ~2 minutes (download cache)
+- Subsequent: ~3-5 minutes (download cache)
 
 ## Documentation
 
-- [Deployment Guide](docs/deployment.md)
-- [API Reference](docs/api-reference.md)
-- [Troubleshooting](docs/troubleshooting.md)
+- [Deployment Guide](docs/deployment.md) - Manual + automated deploy
+- [Environment Management](docs/env-management.md) - Env vars workflow
+- [API Reference](docs/api-reference.md) - Endpoints + parameters
+- [Troubleshooting](docs/troubleshooting.md) - Common errors
+
+## Security
+
+- ✅ API_KEY required for all endpoints (except /health)
+- ✅ Strong random keys (32 bytes / 64 hex chars)
+- ✅ `.env` file mode 600 (owner only)
+- ✅ `.env` not committed to Git
+- ✅ Default placeholder rejected
+- ✅ Short keys warned (recommend ≥32 chars)
 
 ## License
 
@@ -226,5 +243,6 @@ Apache 2.0 (matches VoxCPM2 license)
 ## Related Projects
 
 - [VoxCPM2 Model](https://github.com/OpenBMB/VoxCPM)
+- [VoxCPM2 HuggingFace](https://huggingface.co/openbmb/VoxCPM2)
 - Backend Orchestrator (NestJS): coming soon
 - Frontend Admin (React): coming soon
